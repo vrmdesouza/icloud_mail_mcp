@@ -63,6 +63,16 @@ _COLLECTIONS_PROPFIND = (
 # Far-future sentinel used to sort reminders without a due date last.
 _FAR_FUTURE = datetime.max.replace(tzinfo=UTC)
 
+# Fields that ``update_reminder(clear=...)`` may unset, mapped to the iCalendar
+# property name that gets removed from the VTODO.
+_CLEARABLE_REMINDER_FIELDS = {
+    "due": "due",
+    "start": "dtstart",
+    "description": "description",
+    "url": "url",
+    "priority": "priority",
+}
+
 
 class CalDAVClient:
     """High-level async client for iCloud Calendar (CalDAV).
@@ -595,6 +605,7 @@ class CalDAVClient:
         priority: int | None = None,
         description: str | None = None,
         url: str | None = None,
+        clear: list[str] | None = None,
     ) -> Reminder:
         """Update fields of an existing reminder; only provided fields change.
 
@@ -607,10 +618,24 @@ class CalDAVClient:
             all_day: When provided, switches ``due``/``start`` between
                 date-valued and datetime-valued; when omitted, the existing
                 kind is preserved.
+            clear: Field names to unset entirely (one or more of ``due``,
+                ``start``, ``description``, ``url``, ``priority``). Applied
+                before the set fields, so clearing and setting the same field
+                in one call ends up set.
+
+        Raises:
+            CalDAVError: If ``clear`` names an unknown field.
         """
         rlist = await self._resolve_reminder_list(list)
         cal_obj, href, etag = await self._fetch_todo_resource(rlist, uid)
         todo = _require_todo(cal_obj, uid)
+        for field in clear or []:
+            prop = _CLEARABLE_REMINDER_FIELDS.get(field)
+            if prop is None:
+                allowed = ", ".join(sorted(_CLEARABLE_REMINDER_FIELDS))
+                raise CalDAVError(f"Campo '{field}' não pode ser limpo. Permitidos: {allowed}.")
+            if prop in todo:
+                del todo[prop]
         effective_all_day = _todo_all_day(todo) if all_day is None else all_day
         if summary is not None:
             _set_prop(todo, "summary", summary)
@@ -660,6 +685,66 @@ class CalDAVClient:
         headers = {"If-Match": reminder.etag} if reminder.etag else {}
         await self._request("DELETE", reminder.href, headers=headers)
         return {"status": "deleted", "uid": uid}
+
+    async def move_reminder(self, uid: str, from_list: str, to_list: str) -> Reminder:
+        """Move a reminder to another list (copy to destination, delete original).
+
+        The raw resource is re-PUT verbatim, so every property (including
+        unmodeled ones) is preserved. The destination write uses
+        ``If-None-Match: *`` so it never clobbers an existing resource there.
+        """
+        src = await self._resolve_reminder_list(from_list)
+        dst = await self._resolve_reminder_list(to_list)
+        cal_obj, src_href, etag = await self._fetch_todo_resource(src, uid)
+        todo = _require_todo(cal_obj, uid)
+        if src.url == dst.url:  # same list — nothing to move
+            return _component_to_reminder(todo, src.name, src_href, etag)
+        dst_href = str(httpx.URL(dst.url).join(f"{uid}.ics"))
+        resp = await self._request(
+            "PUT",
+            dst_href,
+            content=cal_obj.to_ical(),
+            headers={"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"},
+        )
+        new_etag = _strip_etag(resp.headers.get("ETag"))
+        await self._request("DELETE", src_href, headers={"If-Match": etag} if etag else {})
+        return _component_to_reminder(todo, dst.name, dst_href, new_etag)
+
+    async def create_reminder_list(self, name: str, color: str | None = None) -> ReminderList:
+        """Create a new Reminders list (a ``VTODO`` collection) via ``MKCALENDAR``."""
+        home = await self._require_home()
+        href = str(httpx.URL(home).join(f"{uuid.uuid4()}/"))
+        await self._request(
+            "MKCALENDAR",
+            href,
+            content=_mkcalendar_vtodo_body(name, color).encode("utf-8"),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+        )
+        return ReminderList(
+            name=name, url=href, color=color[:7] if color else None, read_only=False
+        )
+
+    async def rename_reminder_list(self, name: str, new_name: str) -> ReminderList:
+        """Rename a Reminders list (``PROPPATCH`` of ``displayname``)."""
+        rlist = await self._resolve_reminder_list(name)
+        await self._request(
+            "PROPPATCH",
+            rlist.url,
+            content=_proppatch_displayname_body(new_name).encode("utf-8"),
+            headers={"Content-Type": "application/xml; charset=utf-8"},
+        )
+        return rlist.model_copy(update={"name": new_name})
+
+    async def delete_reminder_list(self, name: str, confirm: bool = False) -> dict[str, str]:
+        """Delete a Reminders list and **all** its tasks. Requires ``confirm=True``."""
+        if not confirm:
+            raise CalDAVError(
+                "Exclusão de lista de lembretes requer confirm=True "
+                "(apaga a lista e todas as suas tarefas)."
+            )
+        rlist = await self._resolve_reminder_list(name)
+        await self._request("DELETE", rlist.url)
+        return {"status": "deleted_list", "list": rlist.name}
 
     async def _fetch_todo_resource(
         self, rlist: ReminderList, uid: str
@@ -913,6 +998,33 @@ def _uid_query_body(uid: str, comp: str = "VEVENT") -> str:
         "</c:prop-filter>"
         "</c:comp-filter></c:comp-filter></c:filter>"
         "</c:calendar-query>"
+    )
+
+
+def _mkcalendar_vtodo_body(name: str, color: str | None) -> str:
+    """Build an MKCALENDAR body for a new ``VTODO`` collection (reminders list)."""
+    color_xml = f"<a:calendar-color>{_xml_escape(color)}</a:calendar-color>" if color else ""
+    return (
+        '<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" '
+        'xmlns:a="http://apple.com/ns/ical/">'
+        "<d:set><d:prop>"
+        f"<d:displayname>{_xml_escape(name)}</d:displayname>"
+        '<c:supported-calendar-component-set><c:comp name="VTODO"/>'
+        "</c:supported-calendar-component-set>"
+        f"{color_xml}"
+        "</d:prop></d:set>"
+        "</c:mkcalendar>"
+    )
+
+
+def _proppatch_displayname_body(new_name: str) -> str:
+    """Build a PROPPATCH body that renames a collection's ``displayname``."""
+    return (
+        '<d:propertyupdate xmlns:d="DAV:">'
+        "<d:set><d:prop>"
+        f"<d:displayname>{_xml_escape(new_name)}</d:displayname>"
+        "</d:prop></d:set>"
+        "</d:propertyupdate>"
     )
 
 
@@ -1392,6 +1504,8 @@ def _component_to_reminder(comp: Any, list_name: str, href: str, etag: str | Non
         priority=priority,
         description=_opt_str(comp.get("description")),
         url=_opt_str(comp.get("url")),
+        created=_coerce_opt_dt(comp.get("created"))[0],
+        modified=_coerce_opt_dt(comp.get("last-modified"))[0],
         href=href,
         etag=etag,
     )

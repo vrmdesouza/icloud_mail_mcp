@@ -799,6 +799,9 @@ def _vtodo(
     priority: int | None = None,
     description: str | None = None,
     url: str | None = None,
+    created: str | None = None,
+    modified: str | None = None,
+    extra: str | None = None,
 ) -> str:
     lines = [
         "BEGIN:VCALENDAR",
@@ -819,6 +822,12 @@ def _vtodo(
         lines.append(f"DESCRIPTION:{description}")
     if url is not None:
         lines.append(f"URL:{url}")
+    if created is not None:
+        lines.append(f"CREATED:{created}")
+    if modified is not None:
+        lines.append(f"LAST-MODIFIED:{modified}")
+    if extra is not None:
+        lines.append(extra)
     lines += ["END:VTODO", "END:VCALENDAR", ""]
     return "\r\n".join(lines)
 
@@ -1034,4 +1043,184 @@ async def test_delete_reminder_sends_if_match() -> None:
     assert result == {"status": "deleted", "uid": "todo-1"}
     assert captured["if_match"] == "etag-old"
     assert captured["url"].endswith("/reminders/todo-1.ics")
+    await client.close()
+
+
+# -- reminders: Phase 1 (clear, metadata, move, list management) ------------
+
+
+async def test_update_reminder_clears_due() -> None:
+    captured: dict[str, str] = {}
+    client = _make_client(_todo_write_handler(_PENDING, captured))
+    reminder = await client.update_reminder("Tasks", "todo-1", clear=["due"])
+    assert reminder.due is None
+    assert "DUE" not in captured["body"]
+    await client.close()
+
+
+async def test_update_reminder_clear_then_set_wins() -> None:
+    captured: dict[str, str] = {}
+    client = _make_client(_todo_write_handler(_PENDING, captured))
+    # Clearing and setting the same field in one call ends up set.
+    reminder = await client.update_reminder(
+        "Tasks", "todo-1", due=datetime(2026, 8, 1, 9, tzinfo=UTC), clear=["due"]
+    )
+    assert reminder.due == datetime(2026, 8, 1, 9, tzinfo=UTC)
+    assert "DUE:20260801T090000Z" in captured["body"]
+    await client.close()
+
+
+async def test_update_reminder_clear_unknown_field_raises() -> None:
+    captured: dict[str, str] = {}
+    client = _make_client(_todo_write_handler(_PENDING, captured))
+    with pytest.raises(CalDAVError, match="não pode ser limpo"):
+        await client.update_reminder("Tasks", "todo-1", clear=["nope"])
+    assert "body" not in captured  # nothing written
+    await client.close()
+
+
+async def test_reminder_parses_created_and_modified() -> None:
+    ics = _vtodo("todo-1", "Buy milk", created="20260101T080000Z", modified="20260102T090000Z")
+    captured: dict[str, str] = {}
+    client = _make_client(_todo_write_handler(ics, captured))
+    reminder = await client.get_reminder("Tasks", "todo-1")
+    assert reminder.created == datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
+    assert reminder.modified == datetime(2026, 1, 2, 9, 0, tzinfo=UTC)
+    await client.close()
+
+
+# Discovery XML exposing two VTODO collections for move tests.
+TWO_LISTS_XML = b"""<?xml version="1.0"?>
+<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <response>
+    <href>/123456/calendars/reminders/</href>
+    <propstat><prop>
+      <displayname>Tasks</displayname>
+      <resourcetype><collection/><c:calendar/></resourcetype>
+      <c:supported-calendar-component-set><c:comp name="VTODO"/>
+      </c:supported-calendar-component-set>
+    </prop><status>HTTP/1.1 200 OK</status></propstat>
+  </response>
+  <response>
+    <href>/123456/calendars/personal/</href>
+    <propstat><prop>
+      <displayname>Personal</displayname>
+      <resourcetype><collection/><c:calendar/></resourcetype>
+      <c:supported-calendar-component-set><c:comp name="VTODO"/>
+      </c:supported-calendar-component-set>
+    </prop><status>HTTP/1.1 200 OK</status></propstat>
+  </response>
+</multistatus>"""
+
+
+def _two_lists_discovery(request: httpx.Request) -> httpx.Response | None:
+    if request.method == "PROPFIND" and request.url.path == "/":
+        return httpx.Response(207, content=PRINCIPAL_XML)
+    if request.method == "PROPFIND" and request.url.path.endswith("/principal/"):
+        return httpx.Response(207, content=HOME_XML)
+    if request.method == "PROPFIND" and request.url.path.endswith("/calendars/"):
+        return httpx.Response(207, content=TWO_LISTS_XML)
+    return None
+
+
+async def test_move_reminder_copies_then_deletes() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        disc = _two_lists_discovery(request)
+        if disc is not None:
+            return disc
+        if request.method == "REPORT":
+            return httpx.Response(
+                207, content=_events_multistatus(_todo_response("todo-1", _PENDING))
+            )
+        if request.method == "PUT":
+            captured["put_url"] = str(request.url)
+            captured["if_none_match"] = request.headers.get("If-None-Match") or ""
+            return httpx.Response(201, headers={"ETag": '"etag-new"'})
+        if request.method == "DELETE":
+            captured["del_url"] = str(request.url)
+            captured["if_match"] = request.headers.get("If-Match") or ""
+            return httpx.Response(204)
+        return httpx.Response(500, text="unexpected")
+
+    client = _make_client(handler)
+    reminder = await client.move_reminder("todo-1", "Tasks", "Personal")
+    assert reminder.list == "Personal"
+    assert reminder.etag == "etag-new"
+    assert captured["put_url"].endswith("/personal/todo-1.ics")
+    assert captured["if_none_match"] == "*"
+    assert captured["del_url"].endswith("/reminders/todo-1.ics")
+    assert captured["if_match"] == "etag-old"
+    await client.close()
+
+
+async def test_create_reminder_list_mkcalendar() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        disc = _discovery(request)
+        if disc is not None:
+            return disc
+        if request.method == "MKCALENDAR":
+            captured["url"] = str(request.url)
+            captured["body"] = request.content.decode()
+            return httpx.Response(201)
+        return httpx.Response(500, text="unexpected")
+
+    client = _make_client(handler)
+    rlist = await client.create_reminder_list("Groceries", color="#00FF00")
+    assert rlist.name == "Groceries"
+    assert rlist.color == "#00FF00"
+    assert rlist.url.startswith("https://p99-caldav.icloud.com/123456/calendars/")
+    assert '<c:comp name="VTODO"/>' in captured["body"]
+    assert "<d:displayname>Groceries</d:displayname>" in captured["body"]
+    assert "#00FF00" in captured["body"]
+    await client.close()
+
+
+async def test_rename_reminder_list_proppatch() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        disc = _discovery(request)
+        if disc is not None:
+            return disc
+        if request.method == "PROPPATCH":
+            captured["url"] = str(request.url)
+            captured["body"] = request.content.decode()
+            return httpx.Response(207, content=_events_multistatus())
+        return httpx.Response(500, text="unexpected")
+
+    client = _make_client(handler)
+    rlist = await client.rename_reminder_list("Tasks", "To Do")
+    assert rlist.name == "To Do"
+    assert captured["url"].endswith("/reminders/")
+    assert "<d:displayname>To Do</d:displayname>" in captured["body"]
+    await client.close()
+
+
+async def test_delete_reminder_list_requires_confirm() -> None:
+    client = _make_client(_default_handler)
+    with pytest.raises(CalDAVError, match="confirm=True"):
+        await client.delete_reminder_list("Tasks")
+    await client.close()
+
+
+async def test_delete_reminder_list_with_confirm() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        disc = _discovery(request)
+        if disc is not None:
+            return disc
+        if request.method == "DELETE":
+            captured["url"] = str(request.url)
+            return httpx.Response(204)
+        return httpx.Response(500, text="unexpected")
+
+    client = _make_client(handler)
+    result = await client.delete_reminder_list("Tasks", confirm=True)
+    assert result == {"status": "deleted_list", "list": "Tasks"}
+    assert captured["url"].endswith("/reminders/")
     await client.close()

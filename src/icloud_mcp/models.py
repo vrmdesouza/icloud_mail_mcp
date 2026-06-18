@@ -271,6 +271,8 @@ class Reminder(BaseModel):
         priority: iCalendar ``PRIORITY`` (0 none, 1-4 high, 5 medium, 6-9 low).
         description: Long-form notes (``DESCRIPTION``).
         url: Associated URL (``URL``).
+        created: Creation timestamp (``CREATED``), if advertised by the server.
+        modified: Last-modification timestamp (``LAST-MODIFIED``), if any.
         href: CalDAV resource path of the reminder (``list.url`` + ``UID.ics``).
         etag: Server ETag, used for optimistic concurrency on update/delete.
     """
@@ -286,5 +288,7 @@ class Reminder(BaseModel):
     priority: int | None = None
     description: str | None = None
     url: str | None = None
+    created: datetime | None = None
+    modified: datetime | None = None
     href: str | None = None
     etag: str | None = None

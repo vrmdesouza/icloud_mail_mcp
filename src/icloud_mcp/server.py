@@ -687,10 +687,15 @@ async def update_reminder(
     priority: int | None = None,
     description: str | None = None,
     url: str | None = None,
+    clear: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update fields of an existing reminder. Only provided fields change.
 
     Use complete_reminder/reopen_reminder to toggle completion.
+
+    Args:
+        clear: Field names to unset entirely (any of "due", "start",
+            "description", "url", "priority") — e.g. to remove a deadline.
     """
     app = _get_ctx(ctx)
     reminder = await app.caldav_client.update_reminder(
@@ -703,6 +708,7 @@ async def update_reminder(
         priority=priority,
         description=description,
         url=url,
+        clear=clear,
     )
     return reminder.model_dump(mode="json")
 
@@ -728,3 +734,57 @@ async def delete_reminder(ctx: Context, list: str, uid: str) -> dict[str, str]: 
     """Delete a reminder by its iCalendar UID."""
     app = _get_ctx(ctx)
     return await app.caldav_client.delete_reminder(list=list, uid=uid)
+
+
+@mcp.tool()
+async def move_reminder(
+    ctx: Context,  # type: ignore[type-arg]
+    uid: str,
+    from_list: str,
+    to_list: str,
+) -> dict[str, Any]:
+    """Move a reminder from one list to another (preserves all its fields)."""
+    app = _get_ctx(ctx)
+    reminder = await app.caldav_client.move_reminder(uid=uid, from_list=from_list, to_list=to_list)
+    return reminder.model_dump(mode="json")
+
+
+@mcp.tool()
+async def create_reminder_list(
+    ctx: Context,  # type: ignore[type-arg]
+    name: str,
+    color: str | None = None,
+) -> dict[str, Any]:
+    """Create a new Reminders list.
+
+    Args:
+        name: Display name for the new list.
+        color: Optional hex color (e.g. "#FF0000").
+    """
+    app = _get_ctx(ctx)
+    rlist = await app.caldav_client.create_reminder_list(name=name, color=color)
+    return rlist.model_dump()
+
+
+@mcp.tool()
+async def rename_reminder_list(ctx: Context, name: str, new_name: str) -> dict[str, Any]:  # type: ignore[type-arg]
+    """Rename an existing Reminders list."""
+    app = _get_ctx(ctx)
+    rlist = await app.caldav_client.rename_reminder_list(name=name, new_name=new_name)
+    return rlist.model_dump()
+
+
+@mcp.tool()
+async def delete_reminder_list(
+    ctx: Context,  # type: ignore[type-arg]
+    name: str,
+    confirm: bool = False,
+) -> dict[str, str]:
+    """Delete a Reminders list and ALL its tasks. Requires confirm=True.
+
+    Args:
+        name: Display name of the list to delete.
+        confirm: Must be True to proceed — this is destructive and irreversible.
+    """
+    app = _get_ctx(ctx)
+    return await app.caldav_client.delete_reminder_list(name=name, confirm=confirm)

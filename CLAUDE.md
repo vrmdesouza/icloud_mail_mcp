@@ -193,12 +193,16 @@ iCloud's server-side `expand` is unreliable, so recurrence is expanded **client-
 | `list_reminders` | `list: str`, `include_completed: bool = False` | `list[Reminder]` | Tasks in a list, ordered by `due` (undated last). Hides completed by default |
 | `get_reminder` | `list: str`, `uid: str` | `Reminder` | Fetch a single reminder by iCalendar UID |
 | `create_reminder` | `list: str`, `summary: str`, `due: str?`, `start: str?`, `all_day: bool = False`, `priority: int?`, `description: str?`, `url: str?` | `Reminder` | Create a task; omit `due` for a task without a deadline |
-| `update_reminder` | `list: str`, `uid: str`, + optional `summary`/`due`/`start`/`all_day`/`priority`/`description`/`url` | `Reminder` | Update the provided fields |
+| `update_reminder` | `list: str`, `uid: str`, + optional `summary`/`due`/`start`/`all_day`/`priority`/`description`/`url`, `clear: list[str]?` | `Reminder` | Update the provided fields. `clear` unsets fields entirely (`due`/`start`/`description`/`url`/`priority`) — e.g. remove a deadline |
 | `complete_reminder` | `list: str`, `uid: str` | `Reminder` | Mark a task completed (`STATUS:COMPLETED`) |
 | `reopen_reminder` | `list: str`, `uid: str` | `Reminder` | Reopen a completed task (`STATUS:NEEDS-ACTION`) |
 | `delete_reminder` | `list: str`, `uid: str` | `dict` | Delete a task by UID |
+| `move_reminder` | `uid: str`, `from_list: str`, `to_list: str` | `Reminder` | Move a task between lists (copy to destination + delete original; all properties preserved) |
+| `create_reminder_list` | `name: str`, `color: str?` | `ReminderList` | Create a new list (`MKCALENDAR` with `VTODO` component set) |
+| `rename_reminder_list` | `name: str`, `new_name: str` | `ReminderList` | Rename a list (`PROPPATCH` of `displayname`) |
+| `delete_reminder_list` | `name: str`, `confirm: bool = False` | `dict` | Delete a list **and all its tasks**; requires `confirm=True` |
 
-`priority` follows iCalendar: 0 = none, 1–4 = high, 5 = medium, 6–9 = low. Recurring reminders are **out of scope for v1** (see the CalDAV decision note above).
+`priority` follows iCalendar: 0 = none, 1–4 = high, 5 = medium, 6–9 = low. Recurring reminders are **out of scope for v1** (see the CalDAV decision note above). `created`/`modified` (from `CREATED`/`LAST-MODIFIED`) are exposed read-only on `Reminder`.
 
 ### Pagination (`list_emails`)
 
