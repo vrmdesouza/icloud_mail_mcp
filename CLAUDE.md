@@ -1,14 +1,10 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
+# Project Overview
 
 `icloud_mcp` (the "iCloud MCP" server) is a Python MCP (Model Context Protocol) server that connects Claude to iCloud. It exposes tools for **Mail** (reading, searching, sending emails, managing folders) over IMAP/SMTP using a persistent IMAP connection pool, for **Calendar** (viewing, creating, editing, deleting events) over CalDAV (`VEVENT`), and for **Reminders** (viewing, creating, editing, completing, deleting tasks) via the **native macOS Reminders app** through EventKit (PyObjC).
 
 > **Why EventKit for Reminders, not CalDAV?** Since iOS 13 / macOS Catalina, the Reminders app migrates tasks off CalDAV into a private store that only the local Reminders app (and EventKit) can read. On upgraded accounts CalDAV `VTODO` only ever sees the empty "Reminders ⚠️" placeholder list — so Reminders are served locally via EventKit instead. This requires the server to run on macOS with the Reminders privacy permission granted. Mail and Calendar are unaffected.
 
-## Development Commands
+# Development Commands
 
 This project uses `uv` for all package and environment management.
 
@@ -40,7 +36,7 @@ uv run pytest tests/test_imap_client.py::test_fetch_email -v
 uv run pytest -v --asyncio-mode=auto
 ```
 
-## iCloud Configuration
+# iCloud Configuration
 
 Credentials are provided exclusively via environment variables. Create a `.env` file (never commit it):
 
@@ -70,7 +66,7 @@ iCloud server endpoints:
 - **CalDAV**: `caldav.icloud.com:443` (HTTPS) — the per-account calendar-home-set is discovered at runtime on a partition host (e.g. `p67-caldav.icloud.com`).
 - **Reminders**: no network endpoint — served locally by the macOS Reminders app via EventKit. Requires the Reminders privacy permission (Ajustes do Sistema → Privacidade e Segurança → Lembretes) for the host process (Claude Desktop, or the terminal when running via `uv run`). The first call triggers the system prompt.
 
-## Code Conventions
+# Code Conventions
 
 - **Language**: Code, variable names, docstrings, and comments in English. Log messages and user-facing error messages in Portuguese (PT-BR).
 - **Docstrings**: Google-style for all public functions and classes.
@@ -83,7 +79,7 @@ iCloud server endpoints:
   - `EventKitError` / `EventKitAuthorizationError` / `EventKitNotAvailableError` — Reminders errors
   - All inherit from a base `ICloudError` (`ICloudMailError` remains as a backward-compatible alias)
 
-## Architecture
+# Architecture
 
 ```
 src/icloud_mcp/
@@ -108,11 +104,11 @@ tests/
 └── test_server.py    # Tests for MCP tool handlers
 ```
 
-### Suggested Implementation Order
+## Suggested Implementation Order
 
 `config` → `models` → `imap_client` → `smtp_client` → `server` → `__main__` → `tests`
 
-### Key Architectural Decisions
+## Key Architectural Decisions
 
 **Persistent IMAP connection pool** (`imap_client.py`): The pool maintains open IMAP connections and reuses them across tool calls. It must handle automatic reconnection on idle timeouts (iCloud disconnects after ~30 minutes of inactivity). All IMAP operations are `async` using `aioimaplib`.
 
@@ -131,32 +127,32 @@ A reminder *with* a `due` is a deadline task; *without* it is a plain task — b
 
 **Config validation** (`config.py`): Reads env vars at startup and fails fast with a clear error if required vars are missing. Use `pydantic-settings` for this.
 
-## Error Handling & Resilience
+# Error Handling & Resilience
 
-### IMAP Pool
+## IMAP Pool
 
 - **Retry**: Exponential backoff — 3 attempts with delays of 1s, 2s, 4s.
 - **Reconnect**: Automatic reconnection when a connection is lost due to idle timeout (~30 min on iCloud). The pool should detect stale connections before reuse (e.g., via NOOP) and replace them transparently.
 - **Exceptions**: Raise `IMAPConnectionError` or `IMAPAuthenticationError` after retries are exhausted.
 
-### SMTP
+## SMTP
 
 - **Retry**: Simple retry — 2 attempts (connection is ephemeral, failures are usually transient).
 - **Exceptions**: Raise `SMTPSendError` with the original error context.
 
-### CalDAV
+## CalDAV
 
 - **Retry**: Simple retry — 3 attempts with delays of 1s, 2s on transport errors and HTTP 5xx.
 - **Auth**: HTTP 401 raises `CalDAVAuthenticationError` immediately (no retry) — usually a regular password used where an App-Specific Password belongs.
 - **Exceptions**: Other 4xx raise `CalDAVError`; exhausted retries raise `CalDAVConnectionError`.
 
-### EventKit (Reminders)
+## EventKit (Reminders)
 
 - **Authorization**: `EventKitStore.connect()` requests Reminders access; a denial/restriction raises `EventKitAuthorizationError` (with PT-BR guidance on granting it). The lifespan logs a warning and keeps Mail/Calendar working if Reminders are unavailable.
 - **Availability**: constructing `EventKitStore` off macOS (or without the PyObjC bindings) raises `EventKitNotAvailableError`.
 - **Exceptions**: a save/remove the store rejects, or a missing reminder/list, raises `EventKitError`.
 
-### Exception Hierarchy
+## Exception Hierarchy
 
 ```python
 class ICloudError(Exception): ...
@@ -172,7 +168,7 @@ class EventKitAuthorizationError(EventKitError): ...
 class EventKitNotAvailableError(EventKitError): ...
 ```
 
-## MCP Tools
+# MCP Tools
 
 | Tool | Transport | Parameters | Return | Description |
 |------|-----------|------------|--------|-------------|
@@ -187,7 +183,7 @@ class EventKitNotAvailableError(EventKitError): ...
 
 > Mail also exposes additional tools (`mark_as_read`/`mark_as_unread`, `flag_email`/`unflag_email`, `bulk_action`, `rename_folder`, `delete_folder`, `get_folder_stats`, `list_attachments`, `download_attachment`, `save_draft`, `reply_email`, `forward_email`, and the rules tools). See `server.py`.
 
-### Calendar Tools (CalDAV)
+## Calendar Tools (CalDAV)
 
 | Tool | Parameters | Return | Description |
 |------|------------|--------|-------------|
@@ -200,7 +196,7 @@ class EventKitNotAvailableError(EventKitError): ...
 | `update_occurrence` | `calendar: str`, `uid: str`, `recurrence_id: str`, + optional `summary`/`start`/`end`/`location`/`description` | `CalendarEvent` | Edit a **single occurrence** of a series (adds a `RECURRENCE-ID` override) |
 | `delete_occurrence` | `calendar: str`, `uid: str`, `recurrence_id: str` | `dict` | Delete a **single occurrence** of a series (adds an `EXDATE`) |
 
-#### Recurrence
+### Recurrence
 
 iCloud's server-side `expand` is unreliable, so recurrence is expanded **client-side** with `recurring-ical-events`:
 - `list_events` expands `RRULE`/`RDATE`/`EXDATE`/`RECURRENCE-ID` into concrete occurrences within the requested window (each carries `recurrence_id`, `is_recurring=True`). Expansion always requires a finite window.
@@ -208,7 +204,7 @@ iCloud's server-side `expand` is unreliable, so recurrence is expanded **client-
 - `create_event`/`update_event` accept a raw `rrule` (e.g. `"FREQ=WEEKLY;BYDAY=MO"`), validated before the `PUT`. They operate on the **whole series**.
 - **Single occurrence**: `update_occurrence` adds/updates a `RECURRENCE-ID` override inside the same resource; `delete_occurrence` adds an `EXDATE` to the master (and drops any override for that slot). Both address the occurrence by `recurrence_id` (the original slot, as returned by `list_events`), validate it against the series, and PUT the whole resource with `If-Match`. The `RECURRENCE-ID`/`EXDATE` value type (date vs datetime) is derived from the master's `DTSTART`. **Out of scope:** "this and future" (`THISANDFUTURE`).
 
-### Reminder Tools (native macOS EventKit)
+## Reminder Tools (native macOS EventKit)
 
 | Tool | Parameters | Return | Description |
 |------|------------|--------|-------------|
@@ -228,22 +224,22 @@ iCloud's server-side `expand` is unreliable, so recurrence is expanded **client-
 
 `priority` follows iCalendar (EventKit uses the same scale): 0 = none, 1–4 = high, 5 = medium, 6–9 = low. `created`/`modified` (from `creationDate`/`lastModifiedDate`) are exposed read-only on `Reminder`.
 
-#### Recurring reminders
+### Recurring reminders
 
 A recurring task is one `Reminder` carrying its `rrule`/`is_recurring` — never expanded into many rows. With EventKit the stored `due` already reflects the **current** occurrence (the system advances it natively), so `list_reminders`/`search_reminders`/`get_reminder` all return `due` as-is; there is no client-side roll-forward.
 - `complete_reminder` on a recurring task only sets `isCompleted` and saves — **EventKit/Reminders.app advances the task to its next occurrence natively** (matching task-app behavior). We do not simulate the advance.
 - `rrule` is converted to/from `EKRecurrenceRule` for the common subset (`FREQ`/`INTERVAL`/`BYDAY`/`COUNT`/`UNTIL`); exotic rules (e.g. `BYSETPOS`) are best-effort and may be lossy.
 - **Caveat (validate against a real account):** the native advance-on-complete behavior is the Reminders app's, which is the reference — confirm with the gated live test (`test_eventkit_store.py`).
 
-#### Alarms
+### Alarms
 
 `Reminder.alarms` is a list of `ReminderAlarm`, each carrying exactly one of `minutes_before` (a relative `EKAlarm`, fired before the due) or `trigger` (an absolute `EKAlarm`). `create_reminder`/`update_reminder` accept `alarms` as a list of dicts (`{"minutes_before": 30}` or `{"trigger": "2026-07-01T08:00:00"}`); on `update_reminder`, `alarms=None` keeps the existing alarms while any list (including `[]`) replaces them all.
 
-### Pagination (`list_emails`)
+## Pagination (`list_emails`)
 
 Uses offset-based pagination with `limit` (number of emails to return, default 20) and `offset` (number of emails to skip, default 0). Emails are ordered by date descending (most recent first).
 
-### Search (`search_emails`)
+## Search (`search_emails`)
 
 All search parameters are optional and combined with AND logic. Maps to IMAP SEARCH commands:
 - `sender` → `FROM`
@@ -252,20 +248,20 @@ All search parameters are optional and combined with AND logic. Maps to IMAP SEA
 - `before` → `BEFORE` (exclusive)
 - `body` → `BODY`
 
-## Testing Strategy
+# Testing Strategy
 
 - **Mocking**: All IMAP and SMTP connections are mocked in `conftest.py` shared fixtures. No real network calls in tests.
 - **Async**: All tests use `pytest-asyncio` with `asyncio_mode = "auto"` — just write `async def test_*` functions.
 - **Coverage focus**: All public functions in `imap_client.py` and `smtp_client.py` must have tests. Server tool handlers should be tested with mocked client calls.
 - **Edge cases**: Test retry/reconnect logic, invalid credentials, malformed emails, empty folders, and pagination boundaries.
 
-## Git Workflow
+# Git Workflow
 
 - **Conventional commits**: `feat:`, `fix:`, `chore:`, `refactor:`, `test:`, `docs:`
 - Run `uv run ruff check .` and `uv run ruff format .` before every commit
 - Run `uv run pytest` before significant commits (new features, refactors)
 
-## Tooling Configuration
+# Tooling Configuration
 
 All tool config lives in `pyproject.toml`:
 
@@ -286,7 +282,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 ```
 
-## Key Dependencies
+# Key Dependencies
 
 - `mcp` — Anthropic official MCP Python SDK
 - `aioimaplib` — async IMAP4 client
